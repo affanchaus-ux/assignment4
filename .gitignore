@@ -1,0 +1,13 @@
+# Python virtual environment (recreate with: python3 -m venv imageenv)
+imageenv/
+
+# Test QCOW2 images (recreate with: --action create-chain)
+*.qcow2
+*.qcow2.bak
+
+# Python cache files
+__pycache__/
+*.pyc
+
+# Test output
+result.json
