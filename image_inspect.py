@@ -126,6 +126,135 @@ def create_chain_action(base_name, count):
     }
 
 
+def resolve_backing(image, backing):
+    if os.path.isabs(backing):
+        return backing
+    return os.path.join(os.path.dirname(image), backing)
+
+
+def verify_chain_action(top):
+    layers = []
+    broken_links = []
+    visited = set()
+    current = top
+    parent = None
+    depth = 0
+
+    print("Verifying chain (top -> base):", file=sys.stderr)
+    while current:
+        entry = {"depth": depth, "image": current}
+        real = os.path.realpath(current)
+        reason = None
+
+        if real in visited:
+            reason = "loop detected in backing chain"
+        elif not os.path.exists(current):
+            reason = "file does not exist"
+        elif not os.access(current, os.R_OK):
+            reason = "file is not readable"
+
+        info = None
+        if reason is None:
+            visited.add(real)
+            try:
+                info = json.loads(run_cmd(["qemu-img", "info", "--output=json", current]))
+            except RuntimeError as e:
+                reason = f"qemu-img cannot open image: {e}"
+
+        indent = "" if depth == 0 else " " * (depth - 1) + "└── "
+        if reason:
+            entry.update({"exists": os.path.exists(current), "status": "BROKEN", "reason": reason})
+            broken_links.append({"referenced_by": parent, "target": current, "reason": reason})
+            layers.append(entry)
+            print(f"{indent}{current} [BROKEN: {reason}]", file=sys.stderr)
+            break
+
+        backing = info.get("backing-filename")
+        next_image = resolve_backing(current, backing) if backing else None
+        entry.update({
+            "exists": True,
+            "readable": True,
+            "format": info.get("format"),
+            "backing_file": next_image,
+            "status": "OK",
+        })
+        layers.append(entry)
+        print(f"{indent}{current} [OK]", file=sys.stderr)
+
+        parent = current
+        current = next_image
+        depth += 1
+
+    return {
+        "action": "verify-chain",
+        "top": top,
+        "chain_status": "BROKEN" if broken_links else "OK",
+        "layers_checked": len(layers),
+        "layers": layers,
+        "broken_links": broken_links,
+    }
+
+
+def human_size(num_bytes):
+    size = float(num_bytes)
+    for unit in ["B", "KiB", "MiB", "GiB", "TiB"]:
+        if size < 1024 or unit == "TiB":
+            return f"{size:.2f} {unit}"
+        size /= 1024
+
+
+def size_report_action(top):
+    if not os.path.exists(top):
+        return {"action": "size-report", "top": top, "error": "image not found"}
+    chain = qemu_info_chain(top)
+
+    layers = []
+    total_actual = 0
+    total_file = 0
+    print(f"{'LAYER':<28}{'VIRTUAL':>14}{'ACTUAL':>14}{'USAGE %':>10}", file=sys.stderr)
+    for depth, layer in enumerate(chain):
+        image = layer["filename"]
+        virtual = layer.get("virtual-size", 0)
+        actual = layer.get("actual-size", 0)
+        file_size = os.path.getsize(image)
+        usage = round(actual / virtual * 100, 4) if virtual else 0.0
+        total_actual += actual
+        total_file += file_size
+
+        layers.append({
+            "depth": depth,
+            "image": image,
+            "role": "base" if depth == len(chain) - 1 else "overlay",
+            "virtual_size_bytes": virtual,
+            "virtual_size_human": human_size(virtual),
+            "actual_size_bytes": actual,
+            "actual_size_human": human_size(actual),
+            "file_size_bytes": file_size,
+            "usage_percent_of_virtual": usage,
+        })
+        print(f"{image:<28}{human_size(virtual):>14}{human_size(actual):>14}{usage:>9.4f}%",
+              file=sys.stderr)
+
+    top_virtual = chain[0].get("virtual-size", 0)
+    print(f"{'TOTAL CHAIN FOOTPRINT':<28}{human_size(top_virtual):>14}{human_size(total_actual):>14}",
+          file=sys.stderr)
+
+    return {
+        "action": "size-report",
+        "top": top,
+        "chain_depth": len(chain),
+        "layers": layers,
+        "totals": {
+            "virtual_size_seen_by_vm_bytes": top_virtual,
+            "virtual_size_seen_by_vm_human": human_size(top_virtual),
+            "total_actual_disk_usage_bytes": total_actual,
+            "total_actual_disk_usage_human": human_size(total_actual),
+            "total_file_size_bytes": total_file,
+            "footprint_percent_of_virtual": round(total_actual / top_virtual * 100, 4) if top_virtual else 0.0,
+        },
+    }
+
+
 def main():
     parser = argparse.ArgumentParser(description="QCOW2 Image Analyser")
     parser.add_argument("--action", required=True,
@@ -149,8 +278,16 @@ def main():
                 result = {"action": "create-chain", "error": "--overlays must be 0 or more"}
             else:
                 result = create_chain_action(args.base, args.overlays)
-        else:
-            result = {"action": args.action, "error": "not implemented yet"}
+        elif args.action == "verify-chain":
+            if not args.top:
+                result = {"action": "verify-chain", "error": "--top is required"}
+            else:
+                result = verify_chain_action(args.top)
+        elif args.action == "size-report":
+            if not args.top:
+                result = {"action": "size-report", "error": "--top is required"}
+            else:
+                result = size_report_action(args.top)
     except RuntimeError as e:
         result = {"action": args.action, "error": str(e)}
 

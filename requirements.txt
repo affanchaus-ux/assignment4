@@ -1,0 +1,10 @@
+# image_inspect.py uses only the Python 3 standard library:
+# argparse, json, os, subprocess, sys, tempfile, datetime
+# No third-party pip packages are required.
+#
+# System requirements (install with apt, not pip):
+# qemu-utils -> provides qemu-img and qemu-nbd
+# nbd kernel module -> sudo modprobe nbd max_part=8
+# e2fsprogs -> provides mkfs.ext4 (preinstalled on Ubuntu)
+# sudo access -> needed by create-chain (qemu-nbd, mkfs, mount)
+
