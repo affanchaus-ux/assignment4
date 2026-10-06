@@ -11,3 +11,9 @@ __pycache__/
 
 # Test output
 result.json
+
+# Log files (rotating)
+image_inspect.log*
+
+# Pytest cache
+.pytest_cache/

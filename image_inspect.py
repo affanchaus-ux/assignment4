@@ -1,12 +1,27 @@
 import argparse
 import json
+import logging
 import os
 import subprocess
 import sys
 import tempfile
 from datetime import datetime, timezone
+from logging.handlers import RotatingFileHandler
 
 NBD_DEVICE = "/dev/nbd0"
+LOG_FILE = "image_inspect.log"
+
+logger = logging.getLogger("image_inspect")
+logger.addHandler(logging.NullHandler())
+
+
+def setup_logging(log_file=LOG_FILE):
+    if any(isinstance(h, RotatingFileHandler) for h in logger.handlers):
+        return
+    logger.setLevel(logging.INFO)
+    handler = RotatingFileHandler(log_file, maxBytes=1_000_000, backupCount=3)
+    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+    logger.addHandler(handler)
 
 
 def run_cmd(cmd, input_text=None):
@@ -42,7 +57,7 @@ def inspect_action(image):
     chain = qemu_info_chain(image)
     top = chain[0]
     print_tree(chain)
-    return {
+    result = {
         "action": "inspect",
         "image": image,
         "format": top.get("format"),
@@ -53,6 +68,10 @@ def inspect_action(image):
         "chain_depth": len(chain),
         "backing_chain_tree": build_tree(chain),
     }
+    logger.info("inspect: %s format=%s virtual=%s actual=%s backing=%s snapshots=%d depth=%d",
+                image, result["format"], result["virtual_size_bytes"], result["actual_size_bytes"],
+                result["backing_file"], result["snapshot_count"], result["chain_depth"])
+    return result
 
 
 def image_path(name):
@@ -107,6 +126,7 @@ def create_chain_action(base_name, count):
         content = f"This is layer {i} ({os.path.basename(image)}) written at {timestamp}\n"
         write_file_into_layer(image, filename, content, make_fs=(i == 0))
         print(f"Created {image} and wrote {filename}", file=sys.stderr)
+        logger.info("create-chain: created %s (backing=%s) and wrote %s", image, backing, filename)
 
         layers.append({
             "layer": i,
@@ -117,6 +137,7 @@ def create_chain_action(base_name, count):
             "content": content.strip(),
         })
 
+    logger.info("create-chain: chain complete, top=%s, layers=%d", images[-1], len(images))
     return {
         "action": "create-chain",
         "base": base,
@@ -167,6 +188,7 @@ def verify_chain_action(top):
             broken_links.append({"referenced_by": parent, "target": current, "reason": reason})
             layers.append(entry)
             print(f"{indent}{current} [BROKEN: {reason}]", file=sys.stderr)
+            logger.warning("verify-chain: BROKEN %s (referenced by %s): %s", current, parent, reason)
             break
 
         backing = info.get("backing-filename")
@@ -180,15 +202,21 @@ def verify_chain_action(top):
         })
         layers.append(entry)
         print(f"{indent}{current} [OK]", file=sys.stderr)
+        logger.info("verify-chain: OK %s", current)
 
         parent = current
         current = next_image
         depth += 1
 
+    status = "BROKEN" if broken_links else "OK"
+    if broken_links:
+        logger.warning("verify-chain: chain from %s is BROKEN (%d layer(s) checked)", top, len(layers))
+    else:
+        logger.info("verify-chain: chain from %s is OK (%d layer(s) checked)", top, len(layers))
     return {
         "action": "verify-chain",
         "top": top,
-        "chain_status": "BROKEN" if broken_links else "OK",
+        "chain_status": status,
         "layers_checked": len(layers),
         "layers": layers,
         "broken_links": broken_links,
@@ -238,6 +266,8 @@ def size_report_action(top):
     top_virtual = chain[0].get("virtual-size", 0)
     print(f"{'TOTAL CHAIN FOOTPRINT':<28}{human_size(top_virtual):>14}{human_size(total_actual):>14}",
           file=sys.stderr)
+    logger.info("size-report: %s layers=%d virtual=%s total_actual=%s",
+                top, len(chain), human_size(top_virtual), human_size(total_actual))
 
     return {
         "action": "size-report",
@@ -265,6 +295,9 @@ def main():
     parser.add_argument("--top", help="Top overlay for verify-chain / size-report")
     args = parser.parse_args()
 
+    setup_logging()
+    logger.info("action=%s started", args.action)
+
     try:
         if args.action == "inspect":
             if not args.image:
@@ -290,6 +323,11 @@ def main():
                 result = size_report_action(args.top)
     except RuntimeError as e:
         result = {"action": args.action, "error": str(e)}
+
+    if "error" in result:
+        logger.error("action=%s error: %s", args.action, result["error"])
+    else:
+        logger.info("action=%s completed", args.action)
 
     print(json.dumps(result, indent=2))
 

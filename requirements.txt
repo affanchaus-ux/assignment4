@@ -8,3 +8,6 @@
 # e2fsprogs -> provides mkfs.ext4 (preinstalled on Ubuntu)
 # sudo access -> needed by create-chain (qemu-nbd, mkfs, mount)
 
+
+# Test dependency (for test_image_inspect.py unit tests):
+pytest==9.1.1
